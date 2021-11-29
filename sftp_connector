@@ -1,0 +1,244 @@
+"""
+Connector to SFTP server.
+Get dictionary with paths and files from SFTP server.
+Move file from one path to another path, download file from server to program memory.
+Upload file from program memory to server path, delete file from SFTP server.
+"""
+
+from io import BytesIO
+import logging
+from stat import S_ISDIR, S_ISREG
+from typing import Optional, BinaryIO
+import pandas as pd
+from paramiko import Transport, SFTPClient
+
+
+
+class Connector:
+    """Connector to SFTP server"""
+
+    def __init__(self, host: str, port: int, username: str, password: str) -> None:
+        """Initialize instance attributes.
+
+        Args:
+            host: hostname of the server
+            port: port of the server
+            username: username to connect
+            password: password to connect
+
+        Attributes:
+            host: hostname of the server
+            port: port of the server
+            username: username to connect
+            password: password to connect
+
+        """
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self._connection: Optional[SFTPClient] = None
+
+    def __del__(self) -> None:
+        """Cleans up after instance existence."""
+        if self._connection is not None:
+            self._close_connection(self._connection)
+
+    @property
+    def connection(self) -> SFTPClient:
+        """Connection with the server.
+            Check connection exists and create if not exist.
+
+        Returns:
+            Connection with the SFTP server.
+        """
+        if self._connection is None:
+            self._connection = self.create_connection(
+                host=self.host,
+                port=self.port,
+                username=self.username,
+                password=self.password,
+            )
+        return self._connection
+
+    @staticmethod
+    def create_connection(
+        host: str, port: int, username: str, password: str
+    ) -> SFTPClient:
+        """Create connection with SFTP server.
+
+        Args:
+            host: hostname of the SFTP server
+            port: port of the SFTP server
+            username: username to connect with SFTP server
+            password: password to connect with SFTP server
+
+        Returns:
+            Connection with the SFTP server.
+        """
+
+        transport = Transport(host, port)
+        transport.connect(username=username, password=password)
+
+        return SFTPClient.from_transport(transport)
+
+    @staticmethod
+    def _close_connection(connection: SFTPClient) -> None:
+        """Closes any service client connection.
+
+        Args:
+            connection: SFTP connection to be closed
+        """
+        raise NotImplementedError()
+
+    def path_exists(self, file_path: str) -> bool:
+        """Check whether file exists in remote path.
+
+        Args:
+            file_path: path on SFTP server
+        Returns:
+            True if path exists.
+            False if path not exist.
+        """
+        try:
+            logging.info(f"Remote path:{file_path}")
+            self.connection.stat(file_path)
+            return True
+        except Exception as e:
+            logging.error(e)
+            return False
+
+    def _sftp_checker(self, files: dict) -> None:
+        """Check the path and files in SFTP server.
+
+        Args:
+            files: dictionary of paths and files in the path
+        """
+        stats = self.connection.listdir_attr(".")
+        files[self.connection.getcwd()] = [
+            attr.filename for attr in stats if S_ISREG(attr.st_mode)
+        ]
+
+        for attr in stats:
+            if S_ISDIR(attr.st_mode):
+                self.connection.chdir(attr.filename)
+                self._sftp_checker(files)
+                self.connection.chdir("..")
+
+    def file_list_recursive(self) -> dict:
+        """Get recursive dictionary of paths and files.
+        
+        Returns:
+            Dictionary of the paths and files (paths are keys and files are values).
+        """
+        dict_of_paths = {}
+        self._sftp_checker(dict_of_paths)
+
+        return dict_of_paths
+
+    def create_folder(self, file_path: str) -> None:
+        """Create new folder on the SFTP server.
+
+        Args:
+            file_path: name of the new path on SFTP server
+        """
+        if self.connection.stat(file_path):
+            logging.error("Path already exists.")
+        else:
+            self.connection.mkdir(file_path)
+
+    def delete_folder(self, file_path: str) -> None:
+        """Delete folder from the SFTP server
+
+        Args:
+            file_path: path on SFTP server
+        """
+        if self.path_exists(file_path):
+            self.connection.rmdir(file_path)
+
+    def move_file(self, file_path: str, destination_path: str) -> None:
+        """Move the file or the folder to another destination.
+
+        Args:
+            file_path: source path of the file
+            destination_path: path to rename
+        """
+
+        if self.path_exists(file_path):
+            if not self.connection.stat(destination_path):
+                self.connection.rename(file_path, destination_path)
+            else:
+                logging.error("Path to move file already exist.")
+
+    def download_file(self, file_path: str) -> BytesIO:
+        """Download file from the path to local path.
+
+        Args:
+            file_path: remote path on SFTP server
+            
+        Returns:
+            File as a binary.
+        """
+        file_io = BytesIO()
+        if self.path_exists(file_path):
+            self.connection.getfo(file_path, file_io)
+
+        return file_io
+
+    def upload_file(self, file_io: BytesIO, file_path: str) -> None:
+        """Upload file from local path to remote path.
+
+        Args:
+            file_io: file in binary
+            file_path: remote path on SFTP server
+        """
+
+        self.connection.putfo(
+            fl=file_io,
+            remotepath=file_path,
+            callback=None,
+            confirm=True,
+        )
+
+    def delete_file(self, file_path: str) -> None:
+        """Delete file from the path.
+
+        Args:
+            file_path: name of the file to delete on SFTP server
+        """
+        if self.path_exists(file_path):
+            self.connection.remove(file_path)
+
+
+def file_checker(file_name: str) -> BinaryIO:
+    """Check files exists.
+        If file exist, open the file, else error.
+
+    Args:
+        file_name: name of the file to check is exist
+
+    Returns:
+        File as a binary.
+    """
+    try:
+        # with open(file_name, 'rb') as file:
+        #     f = BytesIO(file.read())
+        file_io = open(file_name, "rb")
+        return file_io
+    except IOError:
+        logging.error("File not exist.")
+
+
+if __name__ == "__main__":
+    
+    server_keys = pd.read_json("test.json")
+    server_keys.to_dict()
+    
+    host = server_keys["host"]
+    port = server_keys["port"]
+    username = server_keys["username"]
+    password = server_keys["password"]
+    default_path = server_keys["default_path"]
+    
+    connect = Connector(host=host, port=port, username=username, password=password)
+    pass
